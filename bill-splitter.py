@@ -104,46 +104,71 @@ def format_percentages(percentages, split_type):
 def compute_expense_balances(expenses_df):
     """
     Compute net balances from expense records.
-    For each expense:
-      - The payer’s balance increases by the full amount.
-      - Each participant's balance decreases by an equal share.
-    (This example uses an equal split for computation; you can extend it to incorporate custom splits if desired.)
+    - If split is "Equal," each participant splits the cost evenly.
+    - If split is "Custom," each participant pays (percentage/100 * total amount).
     """
     net_balance = {}
     persons = set()
 
-    # Collect all persons' names from Payer and Participants
+    # First, gather all persons
     for _, row in expenses_df.iterrows():
         payer = str(row.get("Payer", "")).strip()
-        participants = row.get("Participants", "")
-        participant_list = [p.strip() for p in str(participants).split(",") if p.strip()]
-        try:
-            _ = float(row.get("Amount", 0))  # Just to ensure it's parseable
-        except:
-            pass
+        participants = str(row.get("Participants", ""))
+        participant_list = [p.strip() for p in participants.split(",") if p.strip()]
         if payer:
             persons.add(payer)
         for p in participant_list:
             persons.add(p)
 
-    # Initialize each person’s net balance to 0
+    # Initialize everyone's balance to 0
     for person in persons:
         net_balance[person] = 0.0
 
-    # Calculate net balances
+    # Now calculate net balances row by row
     for _, row in expenses_df.iterrows():
         payer = str(row.get("Payer", "")).strip()
-        participants = row.get("Participants", "")
-        participant_list = [p.strip() for p in str(participants).split(",") if p.strip()]
+        participants = str(row.get("Participants", ""))
+        participant_list = [p.strip() for p in participants.split(",") if p.strip()]
+
         try:
             amount = float(row.get("Amount", 0))
         except:
-            amount = 0
-        # Even split among participants
-        share = amount / len(participant_list) if participant_list else 0
+            amount = 0.0
+
+        # Check split type
+        split_type = row.get("Split Type", "Equal")
+        raw_percentages = row.get("Percentages", "")
+
+        # The payer always "receives" the total cost
         net_balance[payer] += amount
-        for p in participant_list:
-            net_balance[p] -= share
+
+        if split_type == "Custom":
+            # Attempt to parse the JSON of percentages
+            try:
+                if isinstance(raw_percentages, str) and raw_percentages.strip():
+                    percentages_dict = json.loads(raw_percentages)
+                elif isinstance(raw_percentages, dict):
+                    # In case the data frame hasn't turned it into a string
+                    percentages_dict = raw_percentages
+                else:
+                    percentages_dict = {}
+            except json.JSONDecodeError:
+                percentages_dict = {}
+
+            # Sum of all participant percentages should be 100
+            # Subtract each participant's share from their balance
+            for participant, pct in percentages_dict.items():
+                # Convert to float and divide by 100 to get fraction
+                share_amount = amount * (float(pct) / 100.0)
+                net_balance[participant] -= share_amount
+
+        else:
+            # Default to "Equal" split
+            if participant_list:
+                share = amount / len(participant_list)
+                for p in participant_list:
+                    net_balance[p] -= share
+
     return net_balance
 
 def adjust_for_payments(net_balance, payments_df):
