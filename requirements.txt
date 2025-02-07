@@ -1,0 +1,7 @@
+streamlit
+numpy
+pandas
+gspread
+oauth2client
+json
+datetime
