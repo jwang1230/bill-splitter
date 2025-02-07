@@ -8,15 +8,24 @@ import datetime
 # -----------------------------
 # Google Sheets Setup & Helpers
 # -----------------------------
-# Update these with your own spreadsheet URL and credentials file.
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1CiMpAvxTVXpNhUk8I8wa_ILjS-y9zxLv9lrGIR5ULn0/edit?gid=0#gid=0"  # Replace with your Google Sheet URL
-CREDENTIALS_FILE = "bill-splitter-450203-3209d2741974.json"
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1CiMpAvxTVXpNhUk8I8wa_ILjS-y9zxLv9lrGIR5ULn0/edit?gid=0#gid=0"  
 
 def authenticate_google_sheets():
-    """Authenticate with Google Sheets using service account credentials."""
+    """
+    Authenticate with Google Sheets using service account credentials from Streamlit Secrets.
+    Make sure you've added your JSON under [gcp_service_account] in the Secrets manager.
+    """
     try:
+        # The scopes needed to read/write Google Sheets and Drive
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+
+        # Load the entire JSON credentials from st.secrets
+        sa_info = st.secrets["gcp_service_account"]
+
+        # Create credentials using the JSON dict
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(sa_info, scope)
+
+        # Authorize gspread with these credentials
         client = gspread.authorize(creds)
         return client
     except Exception as e:
@@ -102,20 +111,26 @@ def compute_expense_balances(expenses_df):
     """
     net_balance = {}
     persons = set()
+
+    # Collect all persons' names from Payer and Participants
     for _, row in expenses_df.iterrows():
         payer = str(row.get("Payer", "")).strip()
         participants = row.get("Participants", "")
         participant_list = [p.strip() for p in str(participants).split(",") if p.strip()]
         try:
-            amount = float(row.get("Amount", 0))
+            _ = float(row.get("Amount", 0))  # Just to ensure it's parseable
         except:
-            amount = 0
+            pass
         if payer:
             persons.add(payer)
         for p in participant_list:
             persons.add(p)
+
+    # Initialize each person’s net balance to 0
     for person in persons:
         net_balance[person] = 0.0
+
+    # Calculate net balances
     for _, row in expenses_df.iterrows():
         payer = str(row.get("Payer", "")).strip()
         participants = row.get("Participants", "")
@@ -124,6 +139,7 @@ def compute_expense_balances(expenses_df):
             amount = float(row.get("Amount", 0))
         except:
             amount = 0
+        # Even split among participants
         share = amount / len(participant_list) if participant_list else 0
         net_balance[payer] += amount
         for p in participant_list:
@@ -142,8 +158,8 @@ def adjust_for_payments(net_balance, payments_df):
             amount = float(row.get("Amount", 0))
         except:
             amount = 0
-        payer = str(row.get("Payer", "")).strip()   # person making the payment
-        payee = str(row.get("Payee", "")).strip()     # person receiving the payment
+        payer = str(row.get("Payer", "")).strip()  # person making the payment
+        payee = str(row.get("Payee", "")).strip()  # person receiving the payment
         if payer:
             net_balance[payer] += amount
         if payee:
@@ -159,6 +175,7 @@ def settle_debts(net_balance):
     debtors = [(p, amt) for p, amt in net_balance.items() if amt < -1e-9]
     creditors.sort(key=lambda x: x[1], reverse=True)
     debtors.sort(key=lambda x: x[1])
+
     transactions = []
     i, j = 0, 0
     while i < len(debtors) and j < len(creditors):
@@ -166,10 +183,12 @@ def settle_debts(net_balance):
         creditor, c_amt = creditors[j]
         settlement = min(c_amt, -d_amt)
         transactions.append((debtor, creditor, settlement))
+
         d_amt += settlement
         c_amt -= settlement
         debtors[i] = (debtor, d_amt)
         creditors[j] = (creditor, c_amt)
+
         if abs(d_amt) < 1e-9:
             i += 1
         if abs(c_amt) < 1e-9:
@@ -177,19 +196,22 @@ def settle_debts(net_balance):
     return transactions
 
 # -----------------------------
-# Display Charts (Always Visible)
+# Display the App
 # -----------------------------
 st.title("Bill Splitting & Payment Settlement")
 st.write("Below are the expense and payment records")
 
 # Load data from two worksheets:
-df_expenses = load_google_sheet(SHEET_URL, worksheet_index=0)  # Expense records from Sheet1
-df_payments  = load_google_sheet(SHEET_URL, worksheet_index=1)  # Payment records from Sheet2
+df_expenses = load_google_sheet(SHEET_URL, worksheet_index=0)  # Expense records
+df_payments = load_google_sheet(SHEET_URL, worksheet_index=1)  # Payment records
 
 # Create a display copy for expenses: reformat the Percentages column.
 df_exp_disp = df_expenses.copy()
 if "Percentages" in df_exp_disp.columns:
-    df_exp_disp["Percentages"] = df_exp_disp.apply(lambda row: format_percentages(row.get("Percentages", ""), row.get("Split Type", "Equal")), axis=1)
+    df_exp_disp["Percentages"] = df_exp_disp.apply(
+        lambda row: format_percentages(row.get("Percentages", ""), row.get("Split Type", "Equal")), 
+        axis=1
+    )
 
 st.subheader("All Expense Records")
 if df_exp_disp.empty:
@@ -207,6 +229,7 @@ else:
 net_balance = compute_expense_balances(df_expenses)
 net_balance = adjust_for_payments(net_balance, df_payments)
 transactions = settle_debts(net_balance)
+
 st.subheader("Settlement Chart")
 if transactions:
     settlement_df = pd.DataFrame(transactions, columns=["Debtor", "Creditor", "Amount"])
@@ -215,25 +238,34 @@ else:
     st.write("No settlement needed! Everyone is even.")
 
 # -----------------------------
-# Expense Entry UI (Restored to Original Expense UI)
+# Expense Entry UI
 # -----------------------------
 st.subheader("Enter a New Expense")
+import datetime
+
 exp_date = st.date_input("Date", value=datetime.date.today(), key="exp_date")
 exp_payer = st.text_input("Payer", key="exp_payer")
 exp_amount = st.number_input("Amount", min_value=0.01, format="%.2f", step=0.01, key="exp_amount")
 exp_participants = st.text_area("Participants (comma-separated)", key="exp_participants")
 exp_part_list = [p.strip() for p in exp_participants.split(",") if p.strip()]
 exp_split_type = st.selectbox("Split Type", ["Equal", "Custom"], key="exp_split_type")
+
 if exp_split_type == "Custom" and exp_part_list:
     st.write("Enter custom percentages for each participant (they must sum to 100):")
     exp_percentages = {}
     for participant in exp_part_list:
         default_pct = st.session_state.get(f"exp_pct_{participant}", 0.0)
         exp_percentages[participant] = st.number_input(
-            f"{participant}'s Percentage (%)", min_value=0.0, max_value=100.0,
-            value=default_pct, step=0.1, key=f"exp_pct_{participant}")
+            f"{participant}'s Percentage (%)", 
+            min_value=0.0, 
+            max_value=100.0,
+            value=default_pct, 
+            step=0.1, 
+            key=f"exp_pct_{participant}"
+        )
 else:
     exp_percentages = {}
+
 exp_notes = st.text_input("Notes", key="exp_notes")
 submit_expense = st.button("Add Expense")
 
@@ -247,11 +279,12 @@ if submit_expense:
         exp_error = "Please enter at least one participant."
     elif exp_split_type == "Custom" and abs(sum(exp_percentages.values()) - 100.0) > 0.01:
         exp_error = "For custom splits, the total percentage must equal 100%."
+
     if exp_error:
         st.error(exp_error)
     else:
         new_expense = {
-            "Record Type": "Expense",  # (Not used further here, but you could include it)
+            "Record Type": "Expense",
             "Date": exp_date.strftime("%m/%d/%Y"),
             "Payer": exp_payer,
             "Amount": exp_amount,
@@ -262,11 +295,13 @@ if submit_expense:
         }
         append_to_google_sheet(SHEET_URL, new_expense, worksheet_index=0)
         st.success("Expense added successfully!")
-        # Clear session state keys for expense UI.
+
+        # Clear session state
         for key in ["exp_date", "exp_payer", "exp_amount", "exp_participants", "exp_split_type", "exp_notes"]:
             st.session_state.pop(key, None)
         for participant in exp_part_list:
             st.session_state.pop(f"exp_pct_{participant}", None)
+
         st.rerun()
 
 # -----------------------------
@@ -288,6 +323,7 @@ if submit_payment:
         pay_error = "Please enter the payee's name."
     elif pay_amount <= 0:
         pay_error = "Amount must be greater than 0."
+
     if pay_error:
         st.error(pay_error)
     else:
@@ -300,6 +336,8 @@ if submit_payment:
         }
         append_to_google_sheet(SHEET_URL, new_payment, worksheet_index=1)
         st.success("Payment added successfully!")
+
         for key in ["pay_date", "pay_payer", "pay_amount", "pay_payee", "pay_notes"]:
             st.session_state.pop(key, None)
+
         st.rerun()
